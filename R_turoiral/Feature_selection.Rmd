@@ -1,0 +1,162 @@
+---
+title: "Big Data Science - Feature extraction"
+author: "Henry Lin, Aaron McKinstry, Gen Xiang, Anasse Bari"
+date: "2017/3/7"
+output: html_notebook
+---
+
+
+```{r}
+dyn.load('/Library/Java/JavaVirtualMachines/jdk1.8.0_60.jdk
+         /Contents/Home/jre/lib/server/libjvm.dylib')
+
+library("e1071")
+library("caret")
+library("FSelector")
+```
+
+
+## Data preparation(1)
+
+```{r, echo=TRUE}
+
+# Pls add the headers to your orginal data file
+# Pls change the path to your actual path!
+path <- "./hepatitis.data"
+hepatitis <- read.csv(path, na.strings="?")  # recognize questions marks as NA
+# make it a label
+hepatitis$Class <- as.factor(hepatitis$Class)
+# take a look at first several lines of data
+head(hepatitis)
+
+```
+
+
+## Data preparation(2)
+```{r, echo=TRUE}
+training_pct <- 0.7
+training_indices <- createDataPartition(hepatitis$Class, p = training_pct)[[1]]
+training_hepatitis <- hepatitis[training_indices, ]
+test_hepatitis <- hepatitis[-training_indices, ]
+# check that data are split accordingly
+dim(training_hepatitis)
+dim(test_hepatitis)
+
+# function to fill in missing values
+fill_in_values <- function(data, strategy){
+  
+  numeric_cols <- sapply(data[1,], is.numeric)
+  data[, numeric_cols] <- apply(data[ , numeric_cols], 2, function(x){
+    is_na <- is.na(x)
+    # use valid values to replace missing ones with a given strategy
+    x[is_na] <- strategy(x[!is_na])
+    x
+  })
+  data
+}
+```
+
+
+
+## Cross validation
+```{r, echo=TRUE}
+# calculate accuracy
+get_accuracy <- function(predicted, golden) mean(predicted == golden)
+
+# function to cross validate a model
+cv_perf <- function(train_model, get_golden, data, k=10) {
+  folds_indices <- createFolds(1:nrow(data),k)
+  
+  accuracy <- 0
+  for (test_indices in folds_indices) {
+    training_data <- data[-test_indices, ]
+    test_data <- data[test_indices, ]
+    trained_model <- train_model(training_data)
+    predicted <- predict(trained_model, newdata = test_data)
+    golden <- get_golden(test_data)
+    accuracy <- accuracy + get_accuracy(predicted, golden)
+  }
+  accuracy / k
+}
+```
+
+
+## Test result
+```{r, echo=TRUE}
+# test value replacement strategies
+replacement_strategies <- list(max, min, mean)
+names(replacement_strategies) <- c("max", "min", "mean")
+# test the replacement strategy on training data only
+replaced_data <- lapply(replacement_strategies, function(fn) fill_in_values(training_hepatitis, fn))
+train_nb <- function(x) naiveBayes(Class ~ . , data=x)
+get_golden <- function(x) x$Class
+
+replaced_data_performance <- lapply(replaced_data, function(d) cv_perf(train_nb, get_golden, data=d, k=10))
+
+# display the performance of the three methods
+# the mean outperforms ???
+replaced_data_performance
+```
+
+## Filled missing value
+```{r, echo=TRUE}
+############# go on with using mean for the missing value replacement of entire dataset ###########
+# prepare the filled data
+hepatitis_filled <- fill_in_values(hepatitis, mean)
+training_hepatitis_filled <- hepatitis_filled[training_indices, ]
+test_hepatitis_filled <- hepatitis_filled[-training_indices, ]
+
+#perform PCA and SVD, drop the label column
+hep_pca <- prcomp(hepatitis_filled[ ,-1])
+hep_projected <- cbind(hepatitis_filled[,1], as.data.frame(as.matrix(hepatitis_filled[,-1]) %*% hep_pca$rotation))
+hep_svd <- svd(hepatitis_filled[,-1])
+```
+
+
+##  feature selection strategies representing as functions
+
+- create a list of strategies
+```{r, echo=TRUE}
+feature_selection_strategies <- list(cfs, chi.squared, information.gain, gain.ratio)
+names(feature_selection_strategies) <- c("cfs", "x-sqr", "info-gain", "gain-ratio")
+```
+- Return the features (which is a simple formula contaning selected features) as selected by strategies
+```{r, echo=TRUE}
+apply_feature_selection <- function(strategy, refine, base_formula, data){
+  feature_result <- strategy(base_formula, data)
+  refined <- refine(feature_result)
+  as.simple.formula(refined, all.vars(base_formula)[1])
+}
+```
+
+```{r, echo=TRUE}
+
+# specify a cut_off value 
+cut_off <- 5
+# refinement strategies: a vactor containing 4 functions [x, cutoff.k(x,5), cutoff.k(x,5), cutoff.k(x,5)] 
+refinement_strategies <- c(identity, # cfs,
+                           rep(c(function(x) cutoff.k(x,cut_off)), 3)
+)
+
+all_feature_formula <- Class ~ .
+
+# a list of 4 formulas corresponding to each strategy/refinement
+features_selected <- mapply(function(s, r) apply_feature_selection(s, r, all_feature_formula, training_hepatitis_filled), 
+                            feature_selection_strategies, refinement_strategies)
+
+# cross-validate these features on the training dataset to select the model
+train_nb_with_spec <- function(f) function(d) naiveBayes(f, d)
+cv_perf_feat_selection <- lapply(features_selected, function(m) cv_perf(train_nb_with_spec(m), 
+                                                                        get_golden, training_hepatitis_filled, k=10))
+# display the performance
+cv_perf_feat_selection
+```
+
+## using info-gain and a cutoff of 5 to go on 
+```{r, echo=TRUE}
+best_model_spec <- features_selected[["info-gain"]]
+trained_model <- naiveBayes(best_model_spec, training_hepatitis_filled)
+test_accuracy <- get_accuracy(predict(trained_model, newdata=test_hepatitis_filled), get_golden(test_hepatitis_filled))
+print(paste("Test Accuracy", test_accuracy, spec = " "))
+```
+
